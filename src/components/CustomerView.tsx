@@ -1,4 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
+import { io } from 'socket.io-client';
 import { Tenant, ChatbotConfig, ChatMessage, Conversation } from '../types';
 import { INDUSTRY_TEMPLATES } from '../data/templates';
 import { Send, Paperclip, Bot, User, Sparkles, FileText, CheckCircle2, AlertCircle, Headset, MessageSquare, PhoneCall, Smartphone, Globe, ArrowRight, RotateCcw } from 'lucide-react';
@@ -25,6 +26,26 @@ export const CustomerView: React.FC<CustomerViewProps> = ({ tenant, config }) =>
   // Industry Template Suggested Questions
   const tmpl = INDUSTRY_TEMPLATES.find(t => t.id === tenant.industry) || INDUSTRY_TEMPLATES[0];
   const suggestions = tmpl.suggestedQuestions;
+
+  // Real-time Socket Setup
+  useEffect(() => {
+    const socket = io();
+
+    socket.on('conversation_updated', (updatedConv: Conversation) => {
+      if (updatedConv.id === conversationId) {
+        setMessages(updatedConv.messages);
+        if (updatedConv.status === 'human_handling') {
+          setHandingOff(true);
+        } else if (updatedConv.status === 'resolved') {
+          setHandingOff(false);
+        }
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [conversationId]);
 
   // Initialize Welcome Message
   useEffect(() => {
@@ -72,7 +93,7 @@ export const CustomerView: React.FC<CustomerViewProps> = ({ tenant, config }) =>
 
     // Add User Message Optimistically
     const userMsg: ChatMessage = {
-      id: `u-${Date.now()}`,
+      id: `u-${Date.now()}-${Math.random().toString(36).substring(7)}`,
       sender: 'user',
       text: textToSend,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
@@ -96,16 +117,16 @@ export const CustomerView: React.FC<CustomerViewProps> = ({ tenant, config }) =>
 
       const data = await res.json();
 
-      if (data.replyMessage) {
-        setMessages(prev => [...prev, data.replyMessage]);
-        if (data.conversation?.status === 'human_handling') {
+      if (data.conversation) {
+        setMessages(data.conversation.messages);
+        if (data.conversation.status === 'human_handling') {
           setHandingOff(true);
         }
       }
     } catch (err) {
       console.error("Chat error:", err);
       const errorMsg: ChatMessage = {
-        id: `err-${Date.now()}`,
+        id: `err-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         sender: 'ai',
         text: "I am having trouble connecting to our server right now. Please try again in a moment.",
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
@@ -138,7 +159,7 @@ export const CustomerView: React.FC<CustomerViewProps> = ({ tenant, config }) =>
 
   const resetChat = () => {
     const welcomeMsg: ChatMessage = {
-      id: `welcome-${Date.now()}`,
+      id: `welcome-${Date.now()}-${Math.random().toString(36).substring(7)}`,
       sender: 'ai',
       text: config.welcomeMessage,
       timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })

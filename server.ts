@@ -1,7 +1,10 @@
 import express from "express";
 import path from "path";
+import http from "http";
+import { Server as SocketIOServer } from "socket.io";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
+import twilio from "twilio";
 import { INDUSTRY_TEMPLATES } from "./src/data/templates.js";
 import { INITIAL_TENANTS, INITIAL_CONVERSATIONS, INITIAL_TICKETS, INITIAL_INTEGRATIONS } from "./src/data/mockData.js";
 import { Tenant, DocumentSource, Workflow, Conversation, ChatMessage, Ticket, Integration, ChatbotConfig } from "./src/types.js";
@@ -15,6 +18,12 @@ const ai = new GoogleGenAI({
     }
   }
 });
+
+// Twilio Setup (Lazy Init)
+let twilioClient: twilio.Twilio | null = null;
+if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
+  twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+}
 
 // In-Memory Data Stores
 let tenants: Tenant[] = [...INITIAL_TENANTS];
@@ -103,7 +112,7 @@ function searchKnowledgeBase(tenantId: string, query: string): { docTitle: strin
 }
 
 // Workflow Trigger Evaluation Engine
-function evaluateWorkflows(tenantId: string, userMessage: string): { triggered: boolean; workflow?: Workflow; details?: string } {
+async function evaluateWorkflows(tenantId: string, userMessage: string): Promise<{ triggered: boolean; workflow?: Workflow; details?: string }> {
   const workflows = tenantWorkflows[tenantId] || [];
   const lowerMsg = userMessage.toLowerCase();
 
@@ -117,7 +126,7 @@ function evaluateWorkflows(tenantId: string, userMessage: string): { triggered: 
 
       // Simulate executing workflow actions
       let details = `Automated ${wf.name} initiated. `;
-      wf.actions.forEach(act => {
+      for (const act of wf.actions) {
         if (act.type === 'create_ticket') {
           const newTicket: Ticket = {
             id: `T-${Math.floor(1000 + Math.random() * 9000)}`,
@@ -132,7 +141,36 @@ function evaluateWorkflows(tenantId: string, userMessage: string): { triggered: 
           tickets.unshift(newTicket);
           details += `Created ticket ${newTicket.id}. `;
         } else if (act.type === 'send_sms') {
-          details += `Sent SMS alert to customer phone. `;
+          if (twilioClient && process.env.TWILIO_PHONE_NUMBER && process.env.TWILIO_DESTINATION_PHONE) {
+            try {
+              const isWhatsApp = process.env.TWILIO_PHONE_NUMBER.startsWith('whatsapp:');
+              await twilioClient.messages.create({
+                body: `[${wf.name}] Alert: ${userMessage.slice(0, 100)}`,
+                from: process.env.TWILIO_PHONE_NUMBER,
+                to: process.env.TWILIO_DESTINATION_PHONE
+              });
+              details += `Sent Twilio ${isWhatsApp ? 'WhatsApp' : 'SMS'} alert. `;
+            } catch (err: any) {
+              // console.warn("Twilio error:", err.message);
+              // Fallback to a predefined sandbox template for trial accounts
+              if (err.message && (err.message.includes('template') || err.message.includes('predefined'))) {
+                try {
+                  await twilioClient.messages.create({
+                    body: 'Your appointment is coming up on July 21 at 3PM', // Standard Sandbox Template
+                    from: process.env.TWILIO_PHONE_NUMBER,
+                    to: process.env.TWILIO_DESTINATION_PHONE
+                  });
+                  details += `Sent Twilio Template (Fallback). `;
+                } catch (fallbackErr) {
+                  details += `Failed to send real SMS/WhatsApp. `;
+                }
+              } else {
+                details += `Failed to send real SMS/WhatsApp. `;
+              }
+            }
+          } else {
+            details += `Sent SMS alert (Mocked). `;
+          }
         } else if (act.type === 'sync_crm') {
           details += `Synced lead & event with ${act.target || 'CRM'}. `;
         } else if (act.type === 'hr_leave_request') {
@@ -140,7 +178,7 @@ function evaluateWorkflows(tenantId: string, userMessage: string): { triggered: 
         } else if (act.type === 'book_calendar') {
           details += `Reserved calendar slot in EMR/OpenTable. `;
         }
-      });
+      }
 
       return { triggered: true, workflow: wf, details };
     }
@@ -152,6 +190,8 @@ function evaluateWorkflows(tenantId: string, userMessage: string): { triggered: 
 async function startServer() {
   const app = express();
   const PORT = 3000;
+  const httpServer = http.createServer(app);
+  const io = new SocketIOServer(httpServer, { cors: { origin: "*" } });
 
   app.use(express.json({ limit: "10mb" }));
 
@@ -333,11 +373,12 @@ async function startServer() {
       conv.status = 'human_handling';
       conv.assignedAgent = agentName || 'Agent Specialist';
       conv.messages.push({
-        id: `m-${Date.now()}`,
+        id: `m-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         sender: 'system',
         text: `Conversation assigned to ${conv.assignedAgent}. AI handoff active.`,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       });
+      io.emit('conversation_updated', conv);
     }
     res.json(conv);
   });
@@ -348,13 +389,14 @@ async function startServer() {
     const conv = conversations.find(c => c.id === conversationId);
     if (conv) {
       const msg: ChatMessage = {
-        id: `m-${Date.now()}`,
+        id: `m-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         sender: 'agent',
         text,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       };
       conv.messages.push(msg);
       conv.updatedAt = new Date().toISOString().replace('T', ' ').slice(0, 19);
+      io.emit('conversation_updated', conv);
     }
     res.json(conv);
   });
@@ -365,11 +407,12 @@ async function startServer() {
     if (conv) {
       conv.status = 'resolved';
       conv.messages.push({
-        id: `m-${Date.now()}`,
+        id: `m-${Date.now()}-${Math.random().toString(36).substring(7)}`,
         sender: 'system',
         text: 'Conversation marked as Resolved by Agent.',
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
       });
+      io.emit('conversation_updated', conv);
     }
     res.json(conv);
   });
@@ -381,6 +424,7 @@ async function startServer() {
     if (conv && note) {
       if (!conv.internalNotes) conv.internalNotes = [];
       conv.internalNotes.push(note);
+      io.emit('conversation_updated', conv);
     }
     res.json(conv);
   });
@@ -456,7 +500,7 @@ async function startServer() {
       // Add user message to conversation
       const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const userMsgObj: ChatMessage = {
-        id: `msg-${Date.now()}-u`,
+        id: `msg-${Date.now()}-${Math.random().toString(36).substring(7)}-u`,
         sender: 'user',
         text: userMessage || (documentUpload ? `[Uploaded file: ${documentUpload.name}]` : ''),
         timestamp,
@@ -472,7 +516,7 @@ async function startServer() {
         conv.status = 'human_handling';
         conv.assignedAgent = conv.assignedAgent || 'Duty Agent';
         const aiHandoffMsg: ChatMessage = {
-          id: `msg-${Date.now()}-a`,
+          id: `msg-${Date.now()}-${Math.random().toString(36).substring(7)}-a`,
           sender: 'ai',
           text: config.fallbackMessage || "Connecting you to a human support agent immediately.",
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
@@ -486,7 +530,7 @@ async function startServer() {
       const citations = searchKnowledgeBase(activeTenant.id, userMessage || '');
 
       // 2. Evaluate Workflow Triggers
-      const wfResult = evaluateWorkflows(activeTenant.id, userMessage || '');
+      const wfResult = await evaluateWorkflows(activeTenant.id, userMessage || '');
 
       // 3. Document Content Parsing if file uploaded directly in chat
       let uploadedDocContext = '';
@@ -544,7 +588,7 @@ ${uploadedDocContext}
 
       // Construct AI Response Message
       const aiReplyObj: ChatMessage = {
-        id: `msg-${Date.now()}-a`,
+        id: `msg-${Date.now()}-${Math.random().toString(36).substring(7)}-a`,
         sender: 'ai',
         text: replyText,
         timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
@@ -562,6 +606,8 @@ ${uploadedDocContext}
 
       // Update tenant stats
       activeTenant.stats.conversationsCount += 1;
+
+      io.emit('conversation_updated', conv);
 
       res.json({
         conversation: conv,
@@ -624,7 +670,7 @@ ${uploadedDocContext}
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  httpServer.listen(PORT, "0.0.0.0", () => {
     console.log(`Server listening on http://0.0.0.0:${PORT}`);
   });
 }

@@ -1,4 +1,5 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { io } from 'socket.io-client';
 import { Tenant, Conversation, ChatMessage } from '../types';
 import { Headset, MessageSquare, Send, CheckCircle2, User, Clock, AlertTriangle, Shield, FileText, Search, Plus, Filter } from 'lucide-react';
 
@@ -14,11 +15,7 @@ export const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ tenant }) => {
   const [noteText, setNoteText] = useState('');
   const [agentName] = useState('Agent John Doe');
 
-  useEffect(() => {
-    fetchConversations();
-  }, [tenant.id]);
-
-  const fetchConversations = async () => {
+  const fetchConversations = useCallback(async () => {
     try {
       const res = await fetch(`/api/conversations/${tenant.id}`);
       const data = await res.json();
@@ -29,7 +26,32 @@ export const AgentWorkspace: React.FC<AgentWorkspaceProps> = ({ tenant }) => {
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [tenant.id, selectedConvId]);
+
+  useEffect(() => {
+    fetchConversations();
+  }, [fetchConversations]);
+
+  // Real-time updates
+  useEffect(() => {
+    const socket = io();
+    socket.on('conversation_updated', (updatedConv: Conversation) => {
+      if (updatedConv.tenantId === tenant.id) {
+        setConversations(prev => {
+          const exists = prev.find(c => c.id === updatedConv.id);
+          if (exists) {
+            return prev.map(c => c.id === updatedConv.id ? updatedConv : c);
+          } else {
+            return [updatedConv, ...prev];
+          }
+        });
+      }
+    });
+
+    return () => {
+      socket.disconnect();
+    };
+  }, [tenant.id]);
 
   const activeConv = conversations.find(c => c.id === selectedConvId);
 
