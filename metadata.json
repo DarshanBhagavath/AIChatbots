@@ -1,0 +1,6 @@
+{
+  "name": "AI Business Assistant Platform",
+  "description": "Configurable enterprise AI chatbot platform with multi-tenancy, RAG knowledge bases, industry templates, workflow automation, human handoff, and multi-channel widgets.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
